@@ -204,6 +204,8 @@ let stickyUpdateAnimationId: number | null = null;
 let stickyObserveAnimationId: number | null = null;
 const STICKY_MIN_VISIBLE_HEIGHT = 60;
 const STICKY_BASE_PADDING = 2;
+// タッチ操作が行われたかを保持
+const isTouchDetected = ref(false);
 
 // ウィンドウリサイズ時にリアクティブに再計算をトリガーするためのカウンター
 // window.innerWidth や window.matchMedia() の結果は Vue のリアクティブシステムでは追跡されないため、
@@ -793,6 +795,7 @@ function onPointerDown(event: PointerEvent): void {
     // scrollAreaRef がない場合は何もしない
     if (scrollAreaRef.value === null) return;
 
+
     // 番組セル内のボタン上でのクリックは除外 (ボタン側で処理)
     // 番組セル自体はドラッグ対象とする
     const target = event.target as HTMLElement;
@@ -1127,6 +1130,10 @@ onMounted(async () => {
     if (scrollAreaRef.value !== null) {
         scrollAreaRef.value.addEventListener('wheel', onWheel, { passive: false });
     }
+    // 一度でもタッチされたら true にする (パッシブリスナーで負荷を最小限に)
+    window.addEventListener('touchstart', () => {
+        isTouchDetected.value = true;
+    }, { once: true, passive: true });
 
     // 直近のタッチ操作時刻を更新 (パッシブリスナーで負荷を最小限に)
     window.addEventListener('touchstart', onTouchStart, { passive: true });
@@ -1249,6 +1256,7 @@ watch(() => timetableStore.display_start_time, (value) => {
             touch-action: none !important;
             cursor: grab;
         }
+    }
 
         // タッチ操作が利用できる環境ではブラウザのネイティブスクロールを優先
         @media (any-pointer: coarse) {
@@ -1261,6 +1269,8 @@ watch(() => timetableStore.display_start_time, (value) => {
             touch-action: pan-x pan-y !important;
             cursor: default;
         }
+
+
 
         // ドラッグ中状態: カーソルを grabbing に強制
         // 子要素 (番組セルなど) の cursor: pointer をオーバーライドするため !important を使用
