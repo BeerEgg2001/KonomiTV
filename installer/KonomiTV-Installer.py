@@ -1,4 +1,3 @@
-
 import ctypes
 import os
 import platform
@@ -77,6 +76,15 @@ def main():
     ShowHeader()
 
     print(Padding('KonomiTV のインストール/アップデート/アンインストールを行うインストーラーです。', (1, 2, 0, 2)))
+
+    # フォークバージョンに関する警告メッセージを表示
+    ShowPanel([
+        '[bold yellow]【重要】このバージョンはフォークバージョンです[/bold yellow]',
+        '本インストーラーは、現在のフォークバージョンにおいて動作未検証のため、',
+        'インストールやアップデートの処理に失敗する可能性があります。',
+        'もし処理に失敗した場合は、同梱されている [cyan]docker-compose.yml[/cyan] を使用し、',
+        '手動で Docker を用いたインストールを行ってください。'
+    ], padding=(1, 2, 0, 2))
 
     # サポートされているアーキテクチャ
     ## AMD64 : Windows (x64)

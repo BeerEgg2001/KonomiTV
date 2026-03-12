@@ -1,4 +1,3 @@
-
 import base64
 import hashlib
 import pkgutil
@@ -76,7 +75,15 @@ LIBRARY_PATH = {
     'tsreadex': str(LIBRARY_DIR / 'tsreadex/tsreadex') + LIBRARY_EXTENSION,
     'psisiarc': str(LIBRARY_DIR / 'psisiarc/psisiarc') + LIBRARY_EXTENSION,
     'psisimux': str(LIBRARY_DIR / 'psisimux/psisimux') + LIBRARY_EXTENSION,
+    # CM解析用ツール (KonomiTVネイティブ統合)
+    'chapter_exe': str(LIBRARY_DIR / 'Amatsukaze/bin/chapter_exe') + LIBRARY_EXTENSION,
+    'join_logo_scp': str(LIBRARY_DIR / 'Amatsukaze/bin/join_logo_scp') + LIBRARY_EXTENSION,
+    'logoframe': str(LIBRARY_DIR / 'Amatsukaze/bin/logoframe') + LIBRARY_EXTENSION,
 }
+
+# AviSynth用プラグインの拡張子とパス
+AVISYNTH_PLUGIN_EXTENSION = ('.dll' if sys.platform == 'win32' else '.so')
+LIBRARY_PATH['LSMASHSource'] = str(LIBRARY_DIR / f'Amatsukaze/lib/avisynth/LSMASHSource{AVISYNTH_PLUGIN_EXTENSION}')
 
 # データベース (Tortoise ORM) の設定
 __model_list = [name for _, name, _ in pkgutil.iter_modules(path=['app/models'])]

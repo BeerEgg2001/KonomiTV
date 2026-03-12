@@ -1,4 +1,3 @@
-
 import asyncio
 import json
 import os
@@ -664,6 +663,178 @@ def Installer(version: str) -> None:
             if Path(install_path / 'server/thirdparty/.gitkeep').exists() is False:
                 Path(install_path / 'server/thirdparty/.gitkeep').touch()
 
+        # ***** KonomiTV 内蔵の Amatsukaze ツールのダウンロード・ビルドと配置 *****
+        if platform_type == 'Windows':
+            print(Padding('CM解析ツール (Amatsukaze) をダウンロードしています…', (1, 2, 0, 2)))
+            try:
+                # Amatsukaze の公式ビルド済み ZIP の URL
+                amatsukaze_url = 'https://github.com/nekopanda/Amatsukaze/releases/download/0.9.5.8/Amatsukaze_0.9.5.8.zip'
+                with tempfile.TemporaryDirectory() as am_temp_dir:
+                    am_temp_dir_path = Path(am_temp_dir)
+                    amatsukaze_zip_path = am_temp_dir_path / 'Amatsukaze.zip'
+                    
+                    with CreateDownloadProgress() as progress:
+                        task = progress.add_task('Downloading...', total=0)
+                        response = requests.get(amatsukaze_url, stream=True)
+                        response.raise_for_status()
+                        total_size = int(response.headers.get('Content-Length', 0))
+                        progress.update(task, total=total_size)
+                        with open(amatsukaze_zip_path, 'wb') as file:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                file.write(chunk)
+                                progress.update(task, advance=len(chunk))
+                    
+                    print(Padding('CM解析ツール (Amatsukaze) を配置しています…', (1, 2, 0, 2)))
+                    progress_extract = CreateBasicInfiniteProgress()
+                    progress_extract.add_task('', total=None)
+                    with progress_extract:
+                        amatsukaze_bin_dir = install_path / 'server' / 'thirdparty' / 'Amatsukaze' / 'bin'
+                        amatsukaze_lib_dir = install_path / 'server' / 'thirdparty' / 'Amatsukaze' / 'lib' / 'avisynth'
+                        amatsukaze_bin_dir.mkdir(parents=True, exist_ok=True)
+                        amatsukaze_lib_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        with zipfile.ZipFile(amatsukaze_zip_path, 'r') as zip_ref:
+                            for item in zip_ref.namelist():
+                                if item.endswith('/'):
+                                    continue
+                                filename = os.path.basename(item)
+                                
+                                # CM解析用のメイン実行ファイル
+                                if filename in ['chapter_exe.exe', 'join_logo_scp.exe', 'logoframe.exe']:
+                                    source = zip_ref.open(item)
+                                    with open(amatsukaze_bin_dir / filename, "wb") as target:
+                                        shutil.copyfileobj(source, target)
+                                # AviSynth プラグイン (L-SMASH Works)
+                                elif filename == 'LSMASHSource.dll':
+                                    source = zip_ref.open(item)
+                                    with open(amatsukaze_lib_dir / filename, "wb") as target:
+                                        shutil.copyfileobj(source, target)
+                                # その他の依存 DLL (ポータブル動作のための avisynth.dll 等も含む)
+                                elif filename.endswith('.dll'):
+                                    source = zip_ref.open(item)
+                                    with open(amatsukaze_bin_dir / filename, "wb") as target:
+                                        shutil.copyfileobj(source, target)
+            except Exception as ex:
+                ShowPanel([
+                    '[yellow]CM解析ツール (Amatsukaze) のダウンロードに失敗しました。[/yellow]',
+                    'CM自動スキップ機能は動作しませんが、KonomiTV のインストール自体は継続します。',
+                ])
+                print(ex)
+
+        elif platform_type == 'Linux' and is_arm_device is False:
+            print(Padding('CM解析ツール (Amatsukaze) の Linux ネイティブビルドを行っています… (数分〜数十分かかります)', (1, 2, 0, 2)))
+            try:
+                with tempfile.TemporaryDirectory() as am_temp_dir:
+                    am_temp_dir_path = Path(am_temp_dir)
+                    
+                    # 依存パッケージのインストールとビルドをシェルスクリプトにまとめる
+                    build_script = """#!/bin/bash
+set -ex
+
+export DEBIAN_FRONTEND=noninteractive
+
+# 依存パッケージのインストール
+apt-get update
+apt-get install -y build-essential git curl wget p7zip-full nasm cmake meson ninja-build pkg-config autoconf automake libtool openssl zlib1g libz-dev libssl-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libswresample-dev
+
+# AviSynth+
+curl -L -o avisynth.deb https://github.com/rigaya/AviSynthCUDAFilters/releases/download/0.7.3/avisynth_3.7.5-1_amd64_Ubuntu22.04.deb
+apt-get install -y ./avisynth.deb
+
+# L-SMASH
+git clone https://github.com/l-smash/l-smash.git
+cd l-smash
+git checkout 18a9ed25c7ff79a7f4f4bf850c345c72179b8998
+./configure --enable-shared
+make -j$(nproc)
+make install
+cd ..
+
+# L-SMASH-Works
+export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+git clone https://github.com/HomeOfAviSynthPlusEvolution/L-SMASH-Works.git
+cd L-SMASH-Works
+git checkout $(git rev-list -n 1 --before="2021-11-01" HEAD)
+cd AviSynth
+if [ -f meson.build ]; then
+    meson setup build && ninja -C build && cp build/liblsmashsource.so LSMASHSource.so
+else
+    ./configure && make -j$(nproc) && cp LSMASHSource.so LSMASHSource.so
+fi
+cd ../..
+
+# chapter_exe
+git clone https://github.com/rigaya/chapter_exe
+cd chapter_exe
+git checkout 32880d45f088e574285a101e6a49b032bb04f6ea
+cd src
+make -j$(nproc)
+cd ../..
+
+# join_logo_scp
+git clone --depth=1 --branch Ver4.1.0_Linux https://github.com/tobitti0/join_logo_scp
+cd join_logo_scp/src
+make -j$(nproc)
+cd ../..
+
+# logoframe
+git clone --recursive https://github.com/tobitti0/JoinLogoScpTrialSetLinux.git
+cd JoinLogoScpTrialSetLinux/modules/logoframe/src
+make -j$(nproc)
+cd ../../..
+"""
+                    build_script_path = am_temp_dir_path / 'build.sh'
+                    build_script_path.write_text(build_script, encoding='utf-8')
+                    os.chmod(build_script_path, 0o755)
+
+                    result = RunSubprocess(
+                        name = 'CM解析ツールのソースからのビルド',
+                        args = ['bash', str(build_script_path)],
+                        cwd = am_temp_dir_path,
+                        error_message = 'CM解析ツールのビルド中にエラーが発生しました。',
+                        error_log_name = 'ビルドのエラーログ',
+                    )
+
+                    if result is False:
+                        ShowPanel([
+                            '[yellow]CM解析ツール (Amatsukaze) のビルドに失敗しました。[/yellow]',
+                            'CM自動スキップ機能は動作しませんが、KonomiTV のインストール自体は継続します。',
+                        ])
+                    else:
+                        print(Padding('ビルドした CM解析ツール を配置しています…', (1, 2, 0, 2)))
+                        amatsukaze_bin_dir = install_path / 'server' / 'thirdparty' / 'Amatsukaze' / 'bin'
+                        amatsukaze_lib_dir = install_path / 'server' / 'thirdparty' / 'Amatsukaze' / 'lib' / 'avisynth'
+                        amatsukaze_bin_dir.mkdir(parents=True, exist_ok=True)
+                        amatsukaze_lib_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        shutil.copy(am_temp_dir_path / 'chapter_exe/src/chapter_exe', amatsukaze_bin_dir / 'chapter_exe.elf')
+                        shutil.copy(am_temp_dir_path / 'join_logo_scp/src/join_logo_scp', amatsukaze_bin_dir / 'join_logo_scp.elf')
+                        shutil.copy(am_temp_dir_path / 'JoinLogoScpTrialSetLinux/modules/logoframe/src/logoframe', amatsukaze_bin_dir / 'logoframe.elf')
+                        
+                        for elf_file in amatsukaze_bin_dir.glob('*.elf'):
+                            os.chmod(elf_file, 0o755)
+
+                        shutil.copy(am_temp_dir_path / 'L-SMASH-Works/AviSynth/LSMASHSource.so', amatsukaze_lib_dir / 'LSMASHSource.so')
+                        
+                        for so_file in Path('/usr/local/lib').glob('liblsmash.so*'):
+                            if so_file.is_file() or so_file.is_symlink():
+                                shutil.copy2(so_file, amatsukaze_lib_dir / so_file.name)
+                                
+            except Exception as ex:
+                ShowPanel([
+                    '[yellow]CM解析ツール (Amatsukaze) のビルド処理中に予期しないエラーが発生しました。[/yellow]',
+                    'CM自動スキップ機能は動作しませんが、KonomiTV のインストール自体は継続します。',
+                ])
+                print(ex)
+
+        elif platform_type == 'Linux' and is_arm_device is True:
+            print(Padding('ARM 環境のため、CM解析ツール (Amatsukaze) のビルドはスキップされます。', (1, 2, 0, 2)))
+            ShowPanel([
+                '[yellow]注意: お使いの環境 (ARM アーキテクチャ) では、CM自動スキップ機能は利用できません。[/yellow]',
+                'CM解析に利用しているツール群 (Amatsukaze) が ARM アーキテクチャに対応していないため、',
+                'ツールのビルドと配置はスキップされます。KonomiTV のインストール自体は継続します。',
+            ])
+
         # ***** poetry 環境の構築 (依存パッケージのインストール) *****
 
         # Python の実行ファイルのパス (Windows と Linux で異なる)
@@ -1199,3 +1370,13 @@ def Installer(version: str) -> None:
         table_done.add_row(f'[bright_blue]{url: <{urls_max_length}}[/bright_blue] ({nic_infos[index][1]})')
 
     print(Padding(table_done, (1, 2, 0, 2)))
+
+    # Windows でのみ完了後 15 秒間待機し、自動で閉じる
+    # Linux では自動で閉じられると困るケースの方が多いのでそのまま
+    if os.name == 'nt':
+        import time
+        from rich.live import Live
+        with Live(transient=True) as live:
+            for i in range(15, 0, -1):
+                live.update(Padding(f'{i} 秒後に自動で終了します…', (0, 2, 0, 2)))
+                time.sleep(1)

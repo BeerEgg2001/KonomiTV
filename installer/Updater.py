@@ -1,4 +1,3 @@
-
 import os
 import platform
 import shutil
@@ -52,7 +51,8 @@ def Updater(version: str) -> None:
         '一旦アンインストールし、新規でインストールし直していただきますようお願いいたします。[/yellow]',
     ])
 
-    # 設定データの対話的な取得とエンコーダーの動作確認を行わない以外は、インストーラーの処理内容と大体同じ
+    # 設定データの対話的な取得とエンコーダーの動作確認を行うかは Installer.py と共通
+    # インストール先・アップデート先ディレクトリの決定も Installer.py と共通だが、デフォルトが現在のカレントディレクトリになる
 
     # プラットフォームタイプ
     ## Windows・Linux・Linux (Docker)
@@ -61,439 +61,620 @@ def Updater(version: str) -> None:
     # ARM デバイスかどうか
     is_arm_device = platform.machine() == 'aarch64'
 
-    # ***** アップデート対象の KonomiTV のフォルダのパス *****
+    # ***** KonomiTV をアップデートするフォルダのパス *****
 
     table_02 = CreateTable()
-    table_02.add_column('02. アップデート対象の KonomiTV のフォルダのパスを入力してください。')
+    table_02.add_column('02. KonomiTV をアップデートするフォルダのパスを入力してください。')
     if platform_type == 'Windows':
         table_02.add_row('例: C:\\DTV\\KonomiTV')
     elif platform_type == 'Linux' or platform_type == 'Linux-Docker':
         table_02.add_row('例: /opt/KonomiTV')
     print(Padding(table_02, (1, 2, 1, 2)))
 
-    # アップデート対象の KonomiTV のフォルダを取得
+    # デフォルトの KonomiTV のインストール先のフォルダを取得
+    ## バージョンアップなので、基本は現在のカレントディレクトリになる
+    update_path_default = Path.cwd().resolve()
+
+    # KonomiTV をアップデートするフォルダのパスを取得
     update_path: Path
     while True:
 
-        # 入力プロンプト (バリデーションに失敗し続ける限り何度でも表示される)
-        update_path = Path(CustomPrompt.ask('アップデート対象の KonomiTV のフォルダのパス'))
+        # 入力を求める
+        update_path_input = CustomPrompt.ask(
+            'KonomiTV をアップデートするフォルダ',
+            default = str(update_path_default),
+        )
 
-        # バリデーション
-        if update_path.is_absolute() is False:
-            print(Padding('[red]アップデート対象の KonomiTV のフォルダは絶対パスで入力してください。', (0, 2, 0, 2)))
+        # 指定されたフォルダのパスを Path オブジェクトにする
+        try:
+            update_path = Path(update_path_input).resolve()
+        except ValueError:
+            ShowPanel(['[red]指定されたフォルダのパスは不正です。[/red]'])
             continue
+
+        # 指定されたフォルダが存在しない
         if update_path.exists() is False:
-            print(Padding('[red]アップデート対象の KonomiTV のフォルダが存在しません。', (0, 2, 0, 2)))
+            ShowPanel(['[red]指定されたフォルダが存在しません。[/red]'])
             continue
 
-        # 指定されたフォルダが KonomiTV のフォルダ/ファイル配置と異なる
-        ## 大まかにフォルダ/ファイル配置をチェック (すべてのファイル、フォルダがあれば OK)
-        if not (
-            (update_path / 'config.example.yaml').exists() and
-            (update_path / 'License.txt').exists() and
-            (update_path / 'Readme.md').exists() and
-            (update_path / 'client/').exists() and
-            (update_path / 'installer/').exists() and
-            (update_path / 'server/').exists() and
-            (update_path / 'server/app/').exists() and
-            (update_path / 'server/data/').exists() and
-            (update_path / 'server/logs/').exists() and
-            (update_path / 'server/static/').exists() and
-            (update_path / 'server/thirdparty/').exists()
-        ):
-            print(Padding('[red]指定されたフォルダは KonomiTV のフォルダ/ファイル配置と異なります。', (0, 2, 0, 2)))
+        # 指定されたフォルダに KonomiTV サーバーの実行ファイル (server/KonomiTV.py) がない
+        if (update_path / 'server/KonomiTV.py').is_file() is False:
+            ShowPanel([
+                '[red]指定されたフォルダは KonomiTV のインストール先ではありません。[/red]',
+                'KonomiTV をインストールしたフォルダを指定してください。',
+            ])
             continue
 
-        # すべてのバリデーションを通過したのでループを抜ける
         break
 
-    # Linux: インストールフォルダに docker-compose.yaml があれば
-    # Docker でインストールしたことが推測されるので、プラットフォームタイプを Linux-Docker に切り替える
-    ## インストーラーで Docker を使わずにインストールした場合は docker-compose.yaml は生成されないことを利用している
-    if platform_type == 'Linux' and is_arm_device is False and Path(update_path / 'docker-compose.yaml').exists():
+    # ***** 環境に合ったインストール方法 *****
 
-        # 前回 Docker を使ってインストールされているが、今 Docker がインストールされていない
-        if IsDockerInstalled() is False:
-            ShowPanel([
-                '[yellow]この KonomiTV をアップデートするには、Docker のインストールが必要です。[/yellow]',
-                'この KonomiTV は Docker を使ってインストールされていますが、現在 Docker が',
-                'インストールされていないため、アップデートすることができません。',
-            ])
-            return  # 処理中断
+    if platform_type == 'Windows':
 
-        # プラットフォームタイプを Linux-Docker にセット
-        platform_type = 'Linux-Docker'
+        # 環境にかかわらず常に Windows ネイティブでインストールする
+        pass
 
-        # Docker がインストールされているものの Docker サービスが停止している場合に備え、Docker サービスを起動しておく
-        ## すでに起動している場合は何も起こらない
-        subprocess.run(
-            args = ['systemctl', 'start', 'docker'],
-            stdout = subprocess.DEVNULL,  # 標準出力を表示しない
-            stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-        )
+    elif platform_type == 'Linux' or platform_type == 'Linux-Docker':
 
-    # Docker Compose V2 かどうかでコマンド名を変える
-    ## Docker Compose V1 は docker-compose 、V2 は docker compose という違いがある
-    ## Docker がインストールされていない場合は V1 のコマンドが代入されるが、そもそも非 Docker インストールでは参照されない
+        table_03 = CreateTable()
+        table_03.add_column('03. KonomiTV のアップデート方法を選択してください。')
+        table_03.add_row('Docker を利用したアップデートが最も簡単で、環境を汚さないため推奨されます。')
+        table_03.add_row('既に Docker で動作させている場合は、[1] を選択してください。')
+        print(Padding(table_03, (1, 2, 1, 2)))
+
+        while True:
+            install_method = CustomPrompt.ask(
+                'KonomiTV のアップデート方法 [1: Docker, 2: Linux ネイティブ]',
+                default = '1',
+                choices = ['1', '2'],
+                show_choices = False,
+            )
+            if install_method == '1':
+                platform_type = 'Linux-Docker'
+
+                # Docker がインストールされているか確認
+                if IsDockerInstalled() is False:
+                    ShowPanel([
+                        '[red]Docker がインストールされていません。[/red]',
+                        'Docker を利用したアップデートを実行するには、事前に Docker のインストールが必要です。',
+                    ])
+                    continue
+
+            elif install_method == '2':
+                platform_type = 'Linux'
+            break
+
+    # Docker Compose のコマンドを環境に合わせて設定
     docker_compose_command = ['docker', 'compose'] if IsDockerComposeV2() else ['docker-compose']
 
-    # Python の実行ファイルのパス (Windows と Linux で異なる)
-    ## Linux-Docker では利用されない
-    python_executable_path = ''
-    venv_python_executable_path: str | Path = ''
+    # サーバーのポート番号を取得
+    server_port = 7000
+    try:
+        if (update_path / 'config.yaml').exists():
+            yaml = ruamel.yaml.YAML()
+            config_dict = cast(dict[str, Any], yaml.load(update_path / 'config.yaml'))
+            server_port = config_dict['server']['port']
+    except Exception:
+        pass
+
+
+    # ***** サービスの停止 *****
+
     if platform_type == 'Windows':
-        python_executable_path = update_path / 'server/thirdparty/Python/python.exe'
-        # Windows サービス管理スクリプトは Poetry 経由ではなく、仮想環境の Python 実行ファイルを直接実行する
-        ## Poetry 経由だと Windows で shell 解釈の影響を受け、引数中の記号が崩れる可能性がある
-        venv_python_executable_path = update_path / 'server/.venv/Scripts/python.exe'
-    elif platform_type == 'Linux':
-        python_executable_path = update_path / 'server/thirdparty/Python/bin/python'
 
-    # ***** Windows: 起動中の Windows サービスの終了 *****
-
-    if platform_type == 'Windows':
-
-        # Windows サービスを終了
-        print(Padding('起動中の Windows サービスを終了しています…', (1, 2, 0, 2)))
+        # 既存のタスクスケジューラのタスクを削除 (もしあれば)
+        print(Padding('KonomiTV のタスクスケジューラのタスクを削除しています…', (1, 2, 0, 2)))
         progress = CreateBasicInfiniteProgress()
         progress.add_task('', total=None)
         with progress:
-            service_stop_result = subprocess.run(
-                args = [venv_python_executable_path, 'KonomiTV-Service.py', 'stop'],
-                cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-                stdout = subprocess.PIPE,  # 標準出力をキャプチャする
-                stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-                text = True,  # 出力をテキストとして取得する
+            subprocess.run(
+                args = ['schtasks', '/Delete', '/TN', 'KonomiTV', '/F'],
+                stdout = subprocess.DEVNULL,
+                stderr = subprocess.DEVNULL,
             )
-        # 1062: ERROR_SERVICE_NOT_ACTIVE はサービスが起動していない場合に発生するエラーのため無視する
-        if 'Error stopping service' in service_stop_result.stdout and '(1062)' not in service_stop_result.stdout:
-            ShowSubProcessErrorLog(
-                error_message = '起動中の Windows サービスの終了中に予期しないエラーが発生しました。',
-                error_log = service_stop_result.stdout.strip(),
-            )
-            return  # 処理中断
 
-    # ***** Linux: 起動中の PM2 サービスの終了 *****
+        # バックグラウンドで実行されている KonomiTV サービス (pm2) を停止
+        print(Padding('KonomiTV サービスを停止しています…', (1, 2, 0, 2)))
+        result = RunSubprocess(
+            name = 'KonomiTV サービスの停止',
+            args = [str(update_path / 'thirdparty/Node.js/npm.cmd'), 'run', 'pm2', '--', 'delete', 'KonomiTV'],
+            cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
+            error_message = 'KonomiTV サービスの停止中に予期しないエラーが発生しました。',
+            error_log_name = 'pm2 のエラーログ',
+        )
+        if result is False:
+            # サービスが実行されていないだけかもしれないので、エラーになっても無視する
+            pass
+
+        # 念のため、現在実行中の python.exe を強制終了
+        ## python.exe のほか、KonomiTV に同梱の実行ファイルも対象
+        print(Padding('KonomiTV のプロセスを終了しています…', (1, 2, 0, 2)))
+        progress = CreateBasicInfiniteProgress()
+        progress.add_task('', total=None)
+        with progress:
+            subprocess.run(
+                args = ['taskkill', '/F', '/IM', 'python.exe', '/IM', 'akebi-https-server.exe', '/IM', 'FFmpeg.exe', '/IM', 'FFprobe.exe', '/IM', 'chapter_exe.exe', '/IM', 'join_logo_scp.exe'],
+                stdout = subprocess.DEVNULL,
+                stderr = subprocess.DEVNULL,
+            )
 
     elif platform_type == 'Linux':
 
-        # PM2 サービスを終了
+        # バックグラウンドで実行されている KonomiTV サービス (systemd) を停止
+        print(Padding('KonomiTV サービスを停止しています…', (1, 2, 0, 2)))
         result = RunSubprocess(
-            '起動中の PM2 サービスを終了しています…',
-            ['/usr/bin/env', 'pm2', 'stop', 'KonomiTV'],
-            cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            error_message = '起動中の PM2 サービスの終了中に予期しないエラーが発生しました。',
-            error_log_name = 'PM2 のエラーログ',
+            name = 'KonomiTV サービスの停止',
+            args = ['systemctl', 'stop', 'konomitv.service'],
+            error_message = 'KonomiTV サービスの停止中に予期しないエラーが発生しました。',
+            error_log_name = 'systemctl のエラーログ',
         )
         if result is False:
-            return  # 処理中断
-
-    # ***** Linux-Docker: 起動中の Docker コンテナの終了 *****
+            # サービスが実行されていないだけかもしれないので、エラーになっても無視する
+            pass
 
     elif platform_type == 'Linux-Docker':
 
-        # docker compose stop で Docker コンテナを終了
+        # コンテナの停止と削除
+        print(Padding('KonomiTV サービスを停止しています…', (1, 2, 0, 2)))
         result = RunSubprocess(
-            '起動中の Docker コンテナを終了しています…',
-            [*docker_compose_command, 'stop'],
-            cwd = update_path,  # カレントディレクトリを KonomiTV のアンインストールフォルダに設定
-            error_message = '起動中の Docker コンテナの終了中に予期しないエラーが発生しました。',
-            error_log_name = 'PM2 のエラーログ',
+            name = 'Docker コンテナの停止と削除',
+            args = [*docker_compose_command, 'down'],
+            cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
+            error_message = 'Docker コンテナの停止中に予期しないエラーが発生しました。',
+            error_log_name = 'Docker Compose のエラーログ',
         )
         if result is False:
             return  # 処理中断
 
-    # ***** ソースコードの更新 *****
 
-    # Git を使ってインストールされているか
-    ## Git のインストール状況に関わらず、.git フォルダが存在する場合は Git を使ってインストールされていると判断する
-    is_installed_by_git = Path(update_path / '.git').exists()
+    # ***** サードパーティーライブラリのダウンロードと配置 *****
 
-    # Git を使ってインストールされている場合: git fetch & git checkout でソースコードを更新
-    if is_installed_by_git is True:
+    # ダウンロードする URL
+    ## TODO: 暫定的に v0.13.0 のリリースを使用している
+    if platform_type == 'Windows':
+        download_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v0.13.0/thirdparty-windows.7z'
+    elif platform_type == 'Linux':
+        download_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v0.13.0/thirdparty-linux.tar.xz'
 
-        # 前回 Git を使ってインストールされているが、今 Git がインストールされていない
-        if IsGitInstalled() is False:
+    print(Padding('サードパーティーライブラリをダウンロードしています…', (1, 2, 0, 2)))
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        download_path = temp_dir_path / 'thirdparty.archive'
+
+        # サードパーティーライブラリをダウンロード
+        try:
+            with CreateDownloadProgress() as progress:
+                task = progress.add_task('Downloading...', total=0)
+                response = requests.get(download_url, stream=True)
+                response.raise_for_status()
+                total_size = int(response.headers.get('Content-Length', 0))
+                progress.update(task, total=total_size)
+                with open(download_path, 'wb') as file:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        file.write(chunk)
+                        progress.update(task, advance=len(chunk))
+        except Exception as ex:
             ShowPanel([
-                '[yellow]この KonomiTV をアップデートするには、Git のインストールが必要です。[/yellow]',
-                'KonomiTV は初回インストール時に Git がインストールされている場合は、',
-                '自動的に Git を使ってインストールされます。',
-                'この KonomiTV は Git を使ってインストールされていますが、現在 Git が',
-                'インストールされていないため、アップデートすることができません。',
+                '[red]サードパーティーライブラリのダウンロード中にエラーが発生しました。[/red]',
+                'お手数をおかけしますが、下記のログを開発者に報告してください。',
             ])
-            return  # 処理中断
+            print(ex)
+            return
 
-        # リモートの変更内容とタグを取得
-        result = RunSubprocess(
-            'KonomiTV のソースコードを Git でダウンロードしています…',
-            ['git', 'fetch', 'origin', '--tags'],
-            cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
-            error_message = 'KonomiTV のソースコードのダウンロード中に予期しないエラーが発生しました。',
-            error_log_name = 'Git のエラーログ',
-        )
-        if result is False:
-            return  # 処理中断
+        # サードパーティーライブラリを解凍する
+        print(Padding('サードパーティーライブラリを解凍しています… (これには数分かかります)', (1, 2, 0, 2)))
+        progress = CreateBasicInfiniteProgress()
+        progress.add_task('', total=None)
+        with progress:
+            if platform_type == 'Windows':
+                with py7zr.SevenZipFile(download_path, mode='r') as zip_file:
+                    zip_file.extractall(path=temp_dir_path)
+            elif platform_type == 'Linux':
+                with tarfile.open(download_path, 'r:xz') as tar_file:
+                    tar_file.extractall(path=temp_dir_path)
 
-        # 新しいバージョンのコードをチェックアウト
-        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをチェックアウト
-        revision = 'master' if version == 'latest' else f'v{version}'
-        result = RunSubprocess(
-            'KonomiTV のソースコードを更新しています…',
-            ['git', 'checkout', '--force', revision],
-            cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
-            error_message = 'KonomiTV のソースコードの更新中に予期しないエラーが発生しました。',
-            error_log_name = 'Git のエラーログ',
-        )
-        if result is False:
-            return  # 処理中断
+        # サードパーティーライブラリを配置する
+        print(Padding('サードパーティーライブラリを配置しています…', (1, 2, 0, 2)))
+        progress = CreateBasicInfiniteProgress()
+        progress.add_task('', total=None)
+        with progress:
+            shutil.rmtree(update_path / 'thirdparty', ignore_errors=True)
+            if platform_type == 'Windows':
+                shutil.move(temp_dir_path / 'thirdparty-windows/thirdparty', update_path / 'thirdparty')
+            elif platform_type == 'Linux':
+                shutil.move(temp_dir_path / 'thirdparty', update_path / 'thirdparty')
 
-    # Git を使ってインストールされていない場合: zip からソースコードを更新
+    # ***** KonomiTV 内蔵の Amatsukaze ツールのダウンロード・ビルドと配置 *****
+    if platform_type == 'Windows':
+        print(Padding('CM解析ツール (Amatsukaze) をダウンロードしています…', (1, 2, 0, 2)))
+        try:
+            # Amatsukaze の公式ビルド済み ZIP の URL
+            amatsukaze_url = 'https://github.com/nekopanda/Amatsukaze/releases/download/0.9.5.8/Amatsukaze_0.9.5.8.zip'
+            with tempfile.TemporaryDirectory() as am_temp_dir:
+                am_temp_dir_path = Path(am_temp_dir)
+                amatsukaze_zip_path = am_temp_dir_path / 'Amatsukaze.zip'
+                
+                with CreateDownloadProgress() as progress:
+                    task = progress.add_task('Downloading...', total=0)
+                    response = requests.get(amatsukaze_url, stream=True)
+                    response.raise_for_status()
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    progress.update(task, total=total_size)
+                    with open(amatsukaze_zip_path, 'wb') as file:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            file.write(chunk)
+                            progress.update(task, advance=len(chunk))
+                
+                print(Padding('CM解析ツール (Amatsukaze) を配置しています…', (1, 2, 0, 2)))
+                progress_extract = CreateBasicInfiniteProgress()
+                progress_extract.add_task('', total=None)
+                with progress_extract:
+                    amatsukaze_bin_dir = update_path / 'thirdparty' / 'Amatsukaze' / 'bin'
+                    amatsukaze_lib_dir = update_path / 'thirdparty' / 'Amatsukaze' / 'lib' / 'avisynth'
+                    amatsukaze_bin_dir.mkdir(parents=True, exist_ok=True)
+                    amatsukaze_lib_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    with zipfile.ZipFile(amatsukaze_zip_path, 'r') as zip_ref:
+                        for item in zip_ref.namelist():
+                            if item.endswith('/'):
+                                continue
+                            filename = os.path.basename(item)
+                            
+                            # CM解析用のメイン実行ファイル
+                            if filename in ['chapter_exe.exe', 'join_logo_scp.exe', 'logoframe.exe']:
+                                source = zip_ref.open(item)
+                                with open(amatsukaze_bin_dir / filename, "wb") as target:
+                                    shutil.copyfileobj(source, target)
+                            # AviSynth プラグイン (L-SMASH Works)
+                            elif filename == 'LSMASHSource.dll':
+                                source = zip_ref.open(item)
+                                with open(amatsukaze_lib_dir / filename, "wb") as target:
+                                    shutil.copyfileobj(source, target)
+                            # その他の依存 DLL (ポータブル動作のための avisynth.dll 等も含む)
+                            elif filename.endswith('.dll'):
+                                source = zip_ref.open(item)
+                                with open(amatsukaze_bin_dir / filename, "wb") as target:
+                                    shutil.copyfileobj(source, target)
+        except Exception as ex:
+            ShowPanel([
+                '[yellow]CM解析ツール (Amatsukaze) のダウンロードに失敗しました。[/yellow]',
+                'CM自動スキップ機能は動作しませんが、KonomiTV のアップデート自体は継続します。',
+            ])
+            print(ex)
+
+    elif platform_type == 'Linux' and is_arm_device is False:
+        print(Padding('CM解析ツール (Amatsukaze) の Linux ネイティブビルドを行っています… (数分〜数十分かかります)', (1, 2, 0, 2)))
+        try:
+            with tempfile.TemporaryDirectory() as am_temp_dir:
+                am_temp_dir_path = Path(am_temp_dir)
+                
+                # 依存パッケージのインストールとビルドをシェルスクリプトにまとめる
+                build_script = """#!/bin/bash
+set -ex
+
+export DEBIAN_FRONTEND=noninteractive
+
+# 依存パッケージのインストール
+apt-get update
+apt-get install -y build-essential git curl wget p7zip-full nasm cmake meson ninja-build pkg-config autoconf automake libtool openssl zlib1g libz-dev libssl-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libswresample-dev
+
+# AviSynth+
+curl -L -o avisynth.deb https://github.com/rigaya/AviSynthCUDAFilters/releases/download/0.7.3/avisynth_3.7.5-1_amd64_Ubuntu22.04.deb
+apt-get install -y ./avisynth.deb
+
+# L-SMASH
+git clone https://github.com/l-smash/l-smash.git
+cd l-smash
+git checkout 18a9ed25c7ff79a7f4f4bf850c345c72179b8998
+./configure --enable-shared
+make -j$(nproc)
+make install
+cd ..
+
+# L-SMASH-Works
+export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+git clone https://github.com/HomeOfAviSynthPlusEvolution/L-SMASH-Works.git
+cd L-SMASH-Works
+git checkout $(git rev-list -n 1 --before="2021-11-01" HEAD)
+cd AviSynth
+if [ -f meson.build ]; then
+    meson setup build && ninja -C build && cp build/liblsmashsource.so LSMASHSource.so
+else
+    ./configure && make -j$(nproc) && cp LSMASHSource.so LSMASHSource.so
+fi
+cd ../..
+
+# chapter_exe
+git clone https://github.com/rigaya/chapter_exe
+cd chapter_exe
+git checkout 32880d45f088e574285a101e6a49b032bb04f6ea
+cd src
+make -j$(nproc)
+cd ../..
+
+# join_logo_scp
+git clone --depth=1 --branch Ver4.1.0_Linux https://github.com/tobitti0/join_logo_scp
+cd join_logo_scp/src
+make -j$(nproc)
+cd ../..
+
+# logoframe
+git clone --recursive https://github.com/tobitti0/JoinLogoScpTrialSetLinux.git
+cd JoinLogoScpTrialSetLinux/modules/logoframe/src
+make -j$(nproc)
+cd ../../..
+"""
+                build_script_path = am_temp_dir_path / 'build.sh'
+                build_script_path.write_text(build_script, encoding='utf-8')
+                os.chmod(build_script_path, 0o755)
+
+                result = RunSubprocess(
+                    name = 'CM解析ツールのソースからのビルド',
+                    args = ['bash', str(build_script_path)],
+                    cwd = am_temp_dir_path,
+                    error_message = 'CM解析ツールのビルド中にエラーが発生しました。',
+                    error_log_name = 'ビルドのエラーログ',
+                )
+
+                if result is False:
+                    ShowPanel([
+                        '[yellow]CM解析ツール (Amatsukaze) のビルドに失敗しました。[/yellow]',
+                        'CM自動スキップ機能は動作しませんが、KonomiTV のアップデート自体は継続します。',
+                    ])
+                else:
+                    print(Padding('ビルドした CM解析ツール を配置しています…', (1, 2, 0, 2)))
+                    amatsukaze_bin_dir = update_path / 'thirdparty' / 'Amatsukaze' / 'bin'
+                    amatsukaze_lib_dir = update_path / 'thirdparty' / 'Amatsukaze' / 'lib' / 'avisynth'
+                    amatsukaze_bin_dir.mkdir(parents=True, exist_ok=True)
+                    amatsukaze_lib_dir.mkdir(parents=True, exist_ok=True)
+                    
+                    shutil.copy(am_temp_dir_path / 'chapter_exe/src/chapter_exe', amatsukaze_bin_dir / 'chapter_exe.elf')
+                    shutil.copy(am_temp_dir_path / 'join_logo_scp/src/join_logo_scp', amatsukaze_bin_dir / 'join_logo_scp.elf')
+                    shutil.copy(am_temp_dir_path / 'JoinLogoScpTrialSetLinux/modules/logoframe/src/logoframe', amatsukaze_bin_dir / 'logoframe.elf')
+                    
+                    for elf_file in amatsukaze_bin_dir.glob('*.elf'):
+                        os.chmod(elf_file, 0o755)
+
+                    shutil.copy(am_temp_dir_path / 'L-SMASH-Works/AviSynth/LSMASHSource.so', amatsukaze_lib_dir / 'LSMASHSource.so')
+                    
+                    for so_file in Path('/usr/local/lib').glob('liblsmash.so*'):
+                        if so_file.is_file() or so_file.is_symlink():
+                            shutil.copy2(so_file, amatsukaze_lib_dir / so_file.name)
+                            
+        except Exception as ex:
+            ShowPanel([
+                '[yellow]CM解析ツール (Amatsukaze) のビルド処理中に予期しないエラーが発生しました。[/yellow]',
+                'CM自動スキップ機能は動作しませんが、KonomiTV のアップデート自体は継続します。',
+            ])
+            print(ex)
+
+    elif platform_type == 'Linux' and is_arm_device is True:
+        print(Padding('ARM 環境のため、CM解析ツール (Amatsukaze) のビルドはスキップされます。', (1, 2, 0, 2)))
+        ShowPanel([
+            '[yellow]注意: お使いの環境 (ARM アーキテクチャ) では、CM自動スキップ機能は利用できません。[/yellow]',
+            'CM解析に利用しているツール群 (Amatsukaze) が ARM アーキテクチャに対応していないため、',
+            'ツールのビルドと配置はスキップされます。KonomiTV のアップデート自体は継続します。',
+        ])
+
+
+    # ***** KonomiTV サーバーのアップグレード *****
+
+    print(Padding('KonomiTV サーバーをアップデートしています…', (1, 2, 0, 2)))
+
+    # リポジトリのアップデート
+    if IsGitInstalled():
+
+        progress = CreateBasicInfiniteProgress()
+        progress.add_task('', total=None)
+        with progress:
+            RunSubprocessDirectLogOutput(['git', 'fetch', 'origin'], cwd=update_path)
+            RunSubprocessDirectLogOutput(['git', 'reset', '--hard', 'origin/master'], cwd=update_path)
+
+    # .zip からのアップデート (Git がインストールされていない環境など)
     else:
 
-        # 以前のバージョンにはあったものの、現在のバージョンにはないファイルを削除する
-        ## 事前に config.yaml・venv の仮想環境・ユーザーデータ・ログ以外のファイル/フォルダをすべて削除してから、
-        ## ダウンロードした新しいソースコードで上書き更新する
-        ## Git でインストールされている場合は、作業ツリーの更新を Git がよしなにやってくれるため不要
-        shutil.rmtree(update_path / '.github/', ignore_errors=True)
-        shutil.rmtree(update_path / '.vscode/', ignore_errors=True)
-        shutil.rmtree(update_path / 'client/', ignore_errors=True)
-        shutil.rmtree(update_path / 'installer/', ignore_errors=True)
-        shutil.rmtree(update_path / 'server/app/', ignore_errors=True)
-        shutil.rmtree(update_path / 'server/misc/', ignore_errors=True)
-        shutil.rmtree(update_path / 'server/static/', ignore_errors=True)
-        Path(update_path / 'server/KonomiTV.py').unlink(missing_ok=True)
-        Path(update_path / 'server/KonomiTV-Service.py').unlink(missing_ok=True)
-        Path(update_path / 'server/Pipfile').unlink(missing_ok=True)
-        Path(update_path / 'server/Pipfile.lock').unlink(missing_ok=True)
-        Path(update_path / 'server/poetry.lock').unlink(missing_ok=True)
-        Path(update_path / 'server/poetry.toml').unlink(missing_ok=True)
-        Path(update_path / 'server/pyproject.toml').unlink(missing_ok=True)
-        Path(update_path / '.dockerignore').unlink(missing_ok=True)
-        Path(update_path / '.editorconfig').unlink(missing_ok=True)
-        Path(update_path / '.gitignore').unlink(missing_ok=True)
-        Path(update_path / 'config.example.yaml').unlink(missing_ok=True)
-        Path(update_path / 'docker-compose.example.yaml').unlink(missing_ok=True)
-        Path(update_path / 'Dockerfile').unlink(missing_ok=True)
-        Path(update_path / 'License.txt').unlink(missing_ok=True)
-        Path(update_path / 'Readme.md').unlink(missing_ok=True)
-        Path(update_path / 'vetur.config.js').unlink(missing_ok=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            download_path = temp_dir_path / 'KonomiTV.zip'
 
-        # ソースコードを随時ダウンロードし、進捗を表示
-        # ref: https://github.com/Textualize/rich/blob/master/examples/downloader.py
-        print(Padding('KonomiTV のソースコードを更新しています…', (1, 2, 0, 2)))
-        progress = CreateDownloadInfiniteProgress()
+            # GitHub からアップデート対象のバージョンの .zip をダウンロード
+            try:
+                with CreateDownloadProgress() as progress:
+                    task = progress.add_task('Downloading...', total=0)
+                    response = requests.get(f'https://github.com/tsukumijima/KonomiTV/archive/refs/tags/{version}.zip', stream=True)
+                    response.raise_for_status()
+                    total_size = int(response.headers.get('Content-Length', 0))
+                    progress.update(task, total=total_size)
+                    with open(download_path, 'wb') as file:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            file.write(chunk)
+                            progress.update(task, advance=len(chunk))
+            except Exception as ex:
+                ShowPanel([
+                    '[red]KonomiTV サーバーのアップデート用ソースコードのダウンロード中にエラーが発生しました。[/red]',
+                    'お手数をおかけしますが、下記のログを開発者に報告してください。',
+                ])
+                print(ex)
+                return
 
-        # GitHub からソースコードをダウンロード
-        ## latest の場合は master ブランチを、それ以外は指定されたバージョンのタグをダウンロード
-        if version == 'latest':
-            source_code_response = requests.get('https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/heads/master')
-        else:
-            source_code_response = requests.get(f'https://codeload.github.com/tsukumijima/KonomiTV/zip/refs/tags/v{version}')
-        task_id = progress.add_task('', total=None)
+            # ダウンロードした .zip を解凍して配置する
+            progress = CreateBasicInfiniteProgress()
+            progress.add_task('', total=None)
+            with progress:
+                with zipfile.ZipFile(download_path, mode='r') as zip_file:
+                    zip_file.extractall(path=temp_dir_path)
 
-        # ダウンロードしたデータを随時一時ファイルに書き込む
-        source_code_file = tempfile.NamedTemporaryFile(mode='wb', delete=False)
-        with progress:
-            for chunk in source_code_response.iter_content(chunk_size=1024):
-                source_code_file.write(chunk)
-                progress.update(task_id, advance=len(chunk))
-            source_code_file.seek(0, os.SEEK_END)
-            progress.update(task_id, total=source_code_file.tell())
-        source_code_file.close()  # 解凍する前に close() してすべて書き込ませておくのが重要
+                # KonomiTV のフォルダ内の既存のファイルやディレクトリを KonomiTV-master 内のものと入れ替える
+                ## config.yaml, data/, logs/, thirdparty/ は保持し、それ以外のアップデート対象外のファイルは消去する
+                for update_path_child in update_path.iterdir():
+                    if update_path_child.name not in ['config.yaml', 'data', 'logs', 'thirdparty']:
+                        if update_path_child.is_file() or update_path_child.is_symlink():
+                            update_path_child.unlink()
+                        elif update_path_child.is_dir():
+                            shutil.rmtree(update_path_child, ignore_errors=True)
 
-        # ソースコードを解凍して展開
-        shutil.unpack_archive(source_code_file.name, update_path.parent, format='zip')
-        if version == 'latest':
-            shutil.copytree(update_path.parent / 'KonomiTV-master/', update_path, dirs_exist_ok=True)
-            shutil.rmtree(update_path.parent / 'KonomiTV-master/', ignore_errors=True)
-        else:
-            shutil.copytree(update_path.parent / f'KonomiTV-{version}/', update_path, dirs_exist_ok=True)
-            shutil.rmtree(update_path.parent / f'KonomiTV-{version}/', ignore_errors=True)
-        Path(source_code_file.name).unlink()
+                # KonomiTV-master フォルダ内のファイルを KonomiTV のインストールフォルダに移動する
+                update_src_path = temp_dir_path / f'KonomiTV-{version.replace("v", "")}'
+                for update_src_child in update_src_path.iterdir():
+                    if update_src_child.name not in ['config.yaml', 'data', 'logs', 'thirdparty']:
+                        shutil.move(update_src_child, update_path / update_src_child.name)
 
-    # ***** サーバー設定ファイル (config.yaml) の更新 *****
 
-    # サーバーのリッスンポート
-    server_port: int = 7000
+    # ***** 依存パッケージのインストール *****
 
-    print(Padding('サーバー設定ファイル (config.yaml) を更新しています…', (1, 2, 0, 2)))
-    progress = CreateBasicInfiniteProgress()
-    progress.add_task('', total=None)
-    with progress:
-
-        # 旧バージョンの config.yaml の設定値を取得
-        ## config.yaml の上書き更新前に行うのが重要
-        config_dict: dict[str, dict[str, Any]]
-        with open(update_path / 'config.yaml', encoding='utf-8') as file:
-            config_dict = dict(ruamel.yaml.YAML().load(file))
-            # 0.9.0 -> 0.10.0: config_dict['capture']['upload_folder'] (str) を config_dict['capture']['upload_folders'] (list[str]) に移行
-            if 'upload_folder' in config_dict['capture']:
-                config_dict['capture']['upload_folders'] = [config_dict['capture']['upload_folder']]
-                del config_dict['capture']['upload_folder']
-
-        # サーバーのリッスンポートの設定値を取得
-        server_port = cast(int, config_dict['server']['port'])
-
-        # 新しい config.example.yaml を config.yaml に上書きコピーし、新しいフォーマットに更新
-        shutil.copyfile(update_path / 'config.example.yaml', update_path / 'config.yaml')
-
-        # 旧バージョンの config.yaml の設定値を復元
-        SaveConfig(update_path / 'config.yaml', config_dict)
-
-    # Windows・Linux: KonomiTV のアップデート処理
-    ## Linux-Docker では Docker イメージの再構築時に各種アップデート処理も行われるため、実行の必要がない
     if platform_type == 'Windows' or platform_type == 'Linux':
 
-        # ***** サードパーティーライブラリの更新 *****
+        # サーバー / クライアント共にビルド・インストール済みの KonomiTV リリース版 (.zip) を利用しているとみなして、
+        # Poetry や npm での依存パッケージのインストール / クライアントのビルドをスキップする
+        pass
 
-        # サードパーティーライブラリを随時ダウンロードし、進捗を表示
-        # ref: https://github.com/Textualize/rich/blob/master/examples/downloader.py
-        print(Padding('サードパーティーライブラリをダウンロードしています…', (1, 2, 0, 2)))
-        progress = CreateDownloadProgress()
-
-        # GitHub からサードパーティーライブラリをダウンロード
-        if version == 'latest':
-            thirdparty_base_url = 'https://nightly.link/tsukumijima/KonomiTV/workflows/build_thirdparty.yaml/master/'
-        else:
-            thirdparty_base_url = f'https://github.com/tsukumijima/KonomiTV/releases/download/v{version}/'
-        thirdparty_compressed_file_name = 'thirdparty-windows.7z'
-        if platform_type == 'Linux' and is_arm_device is False:
-            thirdparty_compressed_file_name = 'thirdparty-linux.tar.xz'
-        elif platform_type == 'Linux' and is_arm_device is True:
-            thirdparty_compressed_file_name = 'thirdparty-linux-arm.tar.xz'
-        thirdparty_url = thirdparty_base_url + thirdparty_compressed_file_name
-        if version == 'latest':
-            thirdparty_url = thirdparty_url + '.zip'
-        thirdparty_response = requests.get(thirdparty_url, stream=True)
-        task_id = progress.add_task('', total=float(thirdparty_response.headers['Content-length']))
-
-        # ダウンロードしたデータを随時一時ファイルに書き込む
-        thirdparty_compressed_file = tempfile.NamedTemporaryFile(mode='wb', delete=False)
-        with progress:
-            for chunk in thirdparty_response.iter_content(chunk_size=1048576):  # サイズが大きいので1MBごとに読み込み
-                thirdparty_compressed_file.write(chunk)
-                progress.update(task_id, advance=len(chunk))
-        thirdparty_compressed_file.close()  # 解凍する前に close() してすべて書き込ませておくのが重要
-
-        # サードパーティーライブラリを解凍して展開
-        print(Padding('サードパーティーライブラリを更新しています… (数秒～数十秒かかります)', (1, 2, 0, 2)))
-        progress = CreateBasicInfiniteProgress()
-        progress.add_task('', total=None)
-        with progress:
-
-            # 更新前に、前バージョンの古いサードパーティーライブラリを削除
-            shutil.rmtree(update_path / 'server/thirdparty/', ignore_errors=True)
-
-            # latest のみ、圧縮ファイルがさらに zip で包まれているので、それを解凍
-            thirdparty_compressed_file_path = thirdparty_compressed_file.name
-            if version == 'latest':
-                with zipfile.ZipFile(thirdparty_compressed_file.name, mode='r') as zip_file:
-                    zip_file.extractall(update_path / 'server/')
-                thirdparty_compressed_file_path = update_path / 'server' / thirdparty_compressed_file_name
-                Path(thirdparty_compressed_file.name).unlink()
-
-            if platform_type == 'Windows':
-                # Windows: 7-Zip 形式のアーカイブを解凍
-                with py7zr.SevenZipFile(thirdparty_compressed_file_path, mode='r') as seven_zip:
-                    seven_zip.extractall(update_path / 'server/')
-            elif platform_type == 'Linux':
-                # Linux: tar.xz 形式のアーカイブを解凍
-                ## 7-Zip だと (おそらく) ファイルパーミッションを保持したまま圧縮することができない？ため、あえて tar.xz を使っている
-                with tarfile.open(thirdparty_compressed_file_path, mode='r:xz') as tar_xz:
-                    tar_xz.extractall(update_path / 'server/')
-            Path(thirdparty_compressed_file_path).unlink()
-            # server/thirdparty/.gitkeep が消えてたらもう一度作成しておく
-            if Path(update_path / 'server/thirdparty/.gitkeep').exists() is False:
-                Path(update_path / 'server/thirdparty/.gitkeep').touch()
-
-        # ***** 依存パッケージの更新 *****
-
-        # すでに仮想環境があると稀に更新がうまく行かないことがあるため、アップデート毎に作り直す
-        shutil.rmtree(update_path / 'server/.venv/', ignore_errors=True)
-
-        # poetry env use を実行
-        result = RunSubprocessDirectLogOutput(
-            'Python の仮想環境を作成しています…',
-            [python_executable_path, '-m', 'poetry', 'env', 'use', python_executable_path],
-            cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            environment = {'PYTHON_KEYRING_BACKEND': 'keyring.backends.null.Keyring'},  # Windows で SSH 接続時に発生するエラーを回避
-            error_message = 'Python の仮想環境の作成中に予期しないエラーが発生しました。',
-        )
-        if result is False:
-            return  # 処理中断
-
-        # poetry install を実行
-        # --no-root: プロジェクトのルートパッケージをインストールしない
-        result = RunSubprocessDirectLogOutput(
-            '依存パッケージを更新しています…',
-            [python_executable_path, '-m', 'poetry', 'install', '--only', 'main', '--no-root'],
-            cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            environment = {'PYTHON_KEYRING_BACKEND': 'keyring.backends.null.Keyring'},  # Windows で SSH 接続時に発生するエラーを回避
-            error_message = '依存パッケージの更新中に予期しないエラーが発生しました。',
-        )
-        if result is False:
-            return  # 処理中断
-
-    # Linux-Docker: Docker イメージを再ビルド
     elif platform_type == 'Linux-Docker':
 
-        # docker compose build --no-cache --pull で Docker イメージをビルド
-        ## 万が一以前ビルドしたキャッシュが残っていたときに備え、キャッシュを使わずにビルドさせる
-        result = RunSubprocessDirectLogOutput(
-            'Docker イメージを再ビルドしています… (数分～数十分かかります)',
-            [*docker_compose_command, 'build', '--no-cache', '--pull'],
+        # Docker イメージをビルド
+        ## KonomiTV の Docker イメージはビルド済みで GitHub Container Registry にアップロードされているため、
+        ## docker-compose.yaml 内で build: ではなく image: ghcr.io/tsukumijima/konomitv:latest が指定されている場合は
+        ## ビルドされず、プルだけが行われる
+        print(Padding('Docker イメージをビルド・プルしています…', (1, 2, 0, 2)))
+        result = RunSubprocess(
+            name = 'Docker イメージのビルド・プル',
+            args = [*docker_compose_command, 'build', '--pull'],
             cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
-            error_message = 'Docker イメージの再ビルド中に予期しないエラーが発生しました。',
+            error_message = 'Docker イメージのビルド・プル中に予期しないエラーが発生しました。',
+            error_log_name = 'Docker Compose のエラーログ',
         )
         if result is False:
             return  # 処理中断
 
-    # ***** Windows: Windows サービスの起動 *****
+
+    # ***** サービスの開始 *****
 
     if platform_type == 'Windows':
 
-        # Windows サービスを起動
-        print(Padding('Windows サービスを起動しています…', (1, 2, 0, 2)))
+        # config.yaml から KonomiTV のポート番号を取得し、設定されていれば上書きする
+        # ここで設定したポート番号で、受信規則の開放が行われる
+        server_port = 7000
+        try:
+            if (update_path / 'config.yaml').exists():
+                yaml = ruamel.yaml.YAML()
+                config_dict = cast(dict[str, Any], yaml.load(update_path / 'config.yaml'))
+                server_port = config_dict['server']['port']
+        except Exception:
+            pass
+
+        # Windows Defender ファイアウォールに KonomiTV サーバーのポートを開放する受信規則を追加
+        # すでに存在するかもしれないので、エラーになっても無視する
+        print(Padding('Windows Defender ファイアウォールに受信規則を追加しています…', (1, 2, 0, 2)))
         progress = CreateBasicInfiniteProgress()
         progress.add_task('', total=None)
         with progress:
-            service_start_result = subprocess.run(
-                args = [venv_python_executable_path, 'KonomiTV-Service.py', 'start'],
-                cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-                stdout = subprocess.PIPE,  # 標準出力をキャプチャする
+            subprocess.run(
+                args = [
+                    'netsh', 'advfirewall', 'firewall', 'add', 'rule',
+                    'name=KonomiTV Service',
+                    'dir=in',
+                    'action=allow',
+                    'protocol=TCP',
+                    f'localport={server_port}',
+                ],
+                stdout = subprocess.DEVNULL,  # 標準出力を表示しない
                 stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
-                text = True,  # 出力をテキストとして取得する
             )
-        if 'Error starting service' in service_start_result.stdout:
-            ShowSubProcessErrorLog(
-                error_message = 'Windows サービスの起動中に予期しないエラーが発生しました。',
-                error_log = service_start_result.stdout.strip(),
-            )
-            return  # 処理中断
 
-    # ***** Linux: PM2 サービスの起動 *****
-
-    elif platform_type == 'Linux':
-
-        # PM2 サービスを起動
+        # バックグラウンドで実行される KonomiTV サービス (pm2) を開始
+        print(Padding('KonomiTV サービスを開始しています…', (1, 2, 0, 2)))
         result = RunSubprocess(
-            'PM2 サービスを起動しています…',
-            ['/usr/bin/env', 'pm2', 'start', 'KonomiTV'],
-            cwd = update_path / 'server/',  # カレントディレクトリを KonomiTV サーバーのベースディレクトリに設定
-            error_message = 'PM2 サービスの起動中に予期しないエラーが発生しました。',
-            error_log_name = 'PM2 のエラーログ',
+            name = 'KonomiTV サービスの開始',
+            args = [str(update_path / 'thirdparty/Node.js/npm.cmd'), 'run', 'pm2', '--', 'start', 'server/KonomiTV.py', '--name', 'KonomiTV', '--interpreter', 'thirdparty/Python/python.exe'],
+            cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
+            error_message = 'KonomiTV サービスの開始中に予期しないエラーが発生しました。',
+            error_log_name = 'pm2 のエラーログ',
         )
         if result is False:
             return  # 処理中断
 
-    # ***** Linux-Docker: Docker コンテナの起動 *****
+        # pm2 の設定を保存 (タスクスケジューラからの自動起動で復元される)
+        print(Padding('KonomiTV サービスの設定を保存しています…', (1, 2, 0, 2)))
+        result = RunSubprocess(
+            name = 'KonomiTV サービスの設定の保存',
+            args = [str(update_path / 'thirdparty/Node.js/npm.cmd'), 'run', 'pm2', '--', 'save'],
+            cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
+            error_message = 'KonomiTV サービスの設定の保存中に予期しないエラーが発生しました。',
+            error_log_name = 'pm2 のエラーログ',
+        )
+        if result is False:
+            return  # 処理中断
+
+        # pm2 のタスクスケジューラからの自動起動スクリプトを作成
+        print(Padding('タスクスケジューラに自動起動タスクを追加しています…', (1, 2, 0, 2)))
+        script_path = update_path / 'KonomiTV-Service.bat'
+        with open(script_path, 'w') as file:
+            file.write(
+                f'@echo off\n'
+                f'cd /d "{update_path}"\n'
+                f'set PM2_HOME={update_path / ".pm2"}\n'
+                f'thirdparty\\Node.js\\npm.cmd run pm2 -- resurrect\n'
+            )
+
+        # Windows のタスクスケジューラにユーザーのログオン時に実行するタスクを追加
+        ## VBScript を経由し、ウィンドウを非表示にして実行させる (VBScript は installer.py と同じフォルダにある前提)
+        vbs_path = Path(__file__).resolve().parent / 'KonomiTV-Service.vbs'
+        progress = CreateBasicInfiniteProgress()
+        progress.add_task('', total=None)
+        with progress:
+            subprocess.run(
+                args = [
+                    'schtasks', '/Create', '/TN', 'KonomiTV', '/TR', f'wscript.exe "{vbs_path}" "{script_path}"', '/SC', 'ONLOGON', '/RL', 'HIGHEST', '/F'
+                ],
+                stdout = subprocess.DEVNULL,  # 標準出力を表示しない
+                stderr = subprocess.DEVNULL,  # 標準エラー出力を表示しない
+            )
+
+    elif platform_type == 'Linux':
+
+        # systemd に KonomiTV サービス (konomitv.service) を登録
+        print(Padding('systemd に KonomiTV サービスを追加しています…', (1, 2, 0, 2)))
+        service_path = update_path / 'konomitv.service'
+        with open(service_path, 'w') as file:
+            file.write(
+                f'[Unit]\n'
+                f'Description=KonomiTV Service\n'
+                f'After=network.target\n'
+                f'\n'
+                f'[Service]\n'
+                f'Type=simple\n'
+                f'WorkingDirectory={update_path}\n'
+                f'ExecStart={update_path / "thirdparty/Python/bin/python"} {update_path / "server/KonomiTV.py"}\n'
+                f'Restart=always\n'
+                f'RestartSec=3\n'
+                f'\n'
+                f'[Install]\n'
+                f'WantedBy=multi-user.target\n'
+            )
+
+        # systemctl を使ってサービスを有効化・起動
+        print(Padding('KonomiTV サービスを開始しています…', (1, 2, 0, 2)))
+        progress = CreateBasicInfiniteProgress()
+        progress.add_task('', total=None)
+        with progress:
+            subprocess.run(['systemctl', 'enable', str(service_path)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['systemctl', 'daemon-reload'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        result = RunSubprocess(
+            name = 'KonomiTV サービスの開始',
+            args = ['systemctl', 'restart', 'konomitv.service'],
+            error_message = 'KonomiTV サービスの開始中に予期しないエラーが発生しました。',
+            error_log_name = 'systemctl のエラーログ',
+        )
+        if result is False:
+            return  # 処理中断
 
     elif platform_type == 'Linux-Docker':
 
-        # Docker コンテナを起動
+        # コンテナの起動
+        print(Padding('Docker コンテナを起動しています…', (1, 2, 0, 2)))
         result = RunSubprocess(
-            'Docker コンテナを起動しています…',
-            [*docker_compose_command, 'up', '-d', '--force-recreate'],
+            name = 'Docker コンテナの起動',
+            args = [*docker_compose_command, 'up', '-d', '--force-recreate'],
             cwd = update_path,  # カレントディレクトリを KonomiTV のインストールフォルダに設定
             error_message = 'Docker コンテナの起動中に予期しないエラーが発生しました。',
             error_log_name = 'Docker Compose のエラーログ',
@@ -516,15 +697,24 @@ def Updater(version: str) -> None:
     table_done.add_column(RemoveEmojiIfLegacyTerminal(
         'アップデートが完了しました！🎉🎊 すぐに使いはじめられます！🎈\n'
         '下記の URL から、KonomiTV の Web UI にアクセスしてみましょう！\n'
-        'もし KonomiTV にアクセスできない場合は、ファイアウォールの設定を確認してみてください。',
+        'もし KonomiTV にアクセスできない場合は、ファイアウォールの設定を確認してみてください。'
     ))
 
     # アクセス可能な URL のリストを IP アドレスごとに表示
     ## ローカルホスト (127.0.0.1) だけは https://my.local.konomi.tv:7000/ というエイリアスが使える
     urls = [f'https://{nic_info[0].replace(".", "-")}.local.konomi.tv:{server_port}/' for nic_info in nic_infos]
-    urls_max_length = max([len(url) for url in urls])  # URL の最大文字長を取得
-    table_done.add_row(f'[bright_blue]{f"https://my.local.konomi.tv:{server_port}/": <{urls_max_length}}[/bright_blue] (ローカルホスト)')
-    for index, url in enumerate(urls):
-        table_done.add_row(f'[bright_blue]{url: <{urls_max_length}}[/bright_blue] ({nic_infos[index][1]})')
+    if '127.0.0.1' in [nic_info[0] for nic_info in nic_infos]:
+        urls.append(f'https://my.local.konomi.tv:{server_port}/')
+    table_done.add_row('\n'.join(urls))
 
-    print(Padding(table_done, (1, 2, 0, 2)))
+    print(Padding(table_done, (1, 2, 1, 2)))
+
+    # Windows でのみ完了後 15 秒間待機し、自動で閉じる
+    # Linux では自動で閉じられると困るケースの方が多いのでそのまま
+    if os.name == 'nt':
+        import time
+        from rich.live import Live
+        with Live(transient=True) as live:
+            for i in range(15, 0, -1):
+                live.update(Padding(f'{i} 秒後に自動で終了します…', (0, 2, 0, 2)))
+                time.sleep(1)

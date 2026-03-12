@@ -462,14 +462,6 @@ class RecordedScanTask:
                     except Exception as ex:
                         logging.error(f'{file_path}: Failed to reanalyze known hash collision file:', exc_info=ex)
 
-        # メタデータ解析に失敗した録画ファイルの数をログ出力
-        analysis_failed_count = await RecordedVideo.filter(status='AnalysisFailed').count()
-        if analysis_failed_count > 0:
-            logging.warning(
-                f'Batch scan completed with files in AnalysisFailed status. '
-                f'count: {analysis_failed_count}. '
-                f'Re-run metadata analysis after checking source files.',
-            )
         logging.info('Batch scan of recording folders has been completed.')
         self._is_batch_scan_running = False
 
@@ -900,7 +892,7 @@ class RecordedScanTask:
         - キーフレーム解析
         - サムネイル生成
         - CM区間検出
-        など、時間のかかる処理を非同期に同時実行する
+        など、時間のかかる処理を順次実行する
 
         Args:
             recorded_program (schemas.RecordedProgram): 解析対象の録画番組情報
@@ -915,14 +907,16 @@ class RecordedScanTask:
             async with ProcessLimiter.getSemaphore('RecordedScanTask'):
                 # DriveIOLimiter で同一 HDD に対してのバックグラウンドタスクの同時実行数を原則1セッションに制限
                 async with DriveIOLimiter.getSemaphore(file_path):
+                    
+                    # 1. 既存の解析処理（キーフレーム解析とサムネイル生成）を先に実行
                     await asyncio.gather(
-                        # 録画ファイルのキーフレーム情報を解析し DB に保存
                         KeyFrameAnalyzer(file_path, recorded_program.recorded_video.container_format).analyzeAndSave(),
-                        # 録画ファイルの CM 区間を検出し DB に保存
-                        CMSectionsDetector(file_path, recorded_program.recorded_video.duration).detectAndSave(),
-                        # シークバー用サムネイルとリスト表示用の代表サムネイルの両方を生成
                         ThumbnailGenerator.fromRecordedProgram(recorded_program).generateAndSave(),
                     )
+
+                    # 2. 上記の解析がすべて完了してから、重い I/O 処理である CM検出 を単独で実行
+                    await CMSectionsDetector(file_path, recorded_program.recorded_video.duration).detectAndSave()
+
             logging.info(f'{file_path}: Background analysis task completed.')
 
         except Exception as ex:
