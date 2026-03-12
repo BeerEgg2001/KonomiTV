@@ -482,7 +482,7 @@ cd ../../..
             try:
                 with CreateDownloadProgress() as progress:
                     task = progress.add_task('Downloading...', total=0)
-                    response = requests.get(f'https://github.com/tsukumijima/KonomiTV/archive/refs/tags/{version}.zip', stream=True)
+                    response = requests.get(f'https://codeload.github.com/BeerEgg2001/KonomiTV/zip/refs/heads/features/cm_cut', stream=True)
                     response.raise_for_status()
                     total_size = int(response.headers.get('Content-Length', 0))
                     progress.update(task, total=total_size)
